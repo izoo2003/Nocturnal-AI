@@ -1,0 +1,270 @@
+This file mirrors .cursor/rules/project-context.mdc. That rule has alwaysApply: true.
+
+# Kestrel Industries — Task 4 Register Reconciliation
+
+This is a take-home assessment for Nocturnal AI. Persist this brief across chats. Do not drop the scenario clock, planted anomalies, completeness proofs, or grading rules.
+
+## Company and scenario
+
+- Company: Kestrel Industries, a fictional Karachi manufacturer and exporter, about 900 staff, two factories, buyers in Europe, the UK, and the US.
+- Users: directors and the Finance Controller. They run the business on WhatsApp and email. They will not log into dashboards. They have been burned by automations that failed quietly.
+- A busy controller must be able to read the result on a phone in about 30 seconds. Exceptions come first. Delivery is on the channel they already use, at the scenario time.
+
+## Safety and privacy
+
+- Everything in the dataset is fictional. Phone numbers are deliberately invalid. Emails use `.example`.
+- Never send messages to dataset numbers or emails. Route every test message to the configured test recipient only.
+- Keep secrets, API keys, and tokens in `.env` only. They must not appear in code, logs, screenshots, or git.
+
+## Scenario clock
+
+- Treat "now" as Thursday 15 October 2026, 08:30 PKT (`Asia/Karachi`, `UTC+5`).
+- This must be a setting, for example `SCENARIO_NOW=2026-10-15T08:30:00+05:00` in `.env`.
+- Evaluators replay the automation at that exact moment. Do not use the wall clock as "now".
+
+## The task
+
+Finance Controller request: the store keeps a handwritten receiving register, the ERP has its own entries, and the storekeeper keeps a separate Excel. They never match, and month-end takes three days. Photograph the register pages, report exactly where the three sources disagree, and prove nothing was missed.
+
+Scope is Task 4 only: three-way goods-receiving reconciliation for September 2026.
+
+### Inputs in `kestrel-data/`
+
+1. `t4_register_page1.jpg` and `t4_register_page2.jpg`: handwritten Goods Receiving Register, Sep 2026. Page 1 has 14 filled rows `4401`–`4414` plus 2 blank rows. Page 2 has 14 filled rows `4415`–`4428` plus 2 blank rows. 28 filled rows total. Columns: `Date` (DD/MM), `GRN No.`, `Supplier`, `Item / Description`, `Lot No.`, `Qty`, `Unit`, `Recd by`.
+2. `t4_erp_grn.csv`: ERP goods-received notes. 28 data rows, `GRN-4401` to `GRN-4430`, with `4421` and `4429` missing. Columns: `grn_no`, `grn_date` (ISO YYYY-MM-DD), `supplier_code`, `supplier_name`, `item_desc`, `lot_no`, `qty` (float), `uom` (uppercase singular), `entered_by`, `entered_at`.
+3. `t4_store_sheet.xlsx`: storekeeper workbook. Sheet name `Sep-2026`. 30 data rows in Excel rows 2–31. Columns: `Date`, `GRN`, `Supplier`, `Material`, `Lot`, `Qty Received`, `UOM`, `Remarks`.
+
+`t4_erp_grn.csv` is present and matches the ERP side of the ground truth below. The README also names the two register photos and the store workbook; treat them as required inputs even if a checkout is missing them.
+
+## Must-have behavior
+
+1. Vision extraction without guessing. Turn the register photos into structured rows. Anything unclear (crossed-out numbers, overwrites, ink blots, smudges) is flagged for a human. The model must never guess a digit.
+2. Focused human review. A person resolves only the doubtful fields, not all 28 rows.
+3. Three-way reconciliation is deterministic code, not an LLM. Compare Register, ERP, and Store Sheet. Classify every record as:
+   - Matched: agrees across all three sources after canonical normalization.
+   - Mismatched: name the disagreeing field and show the exact value from each source.
+   - Missing from a source: present in one or two sources and absent from the other(s).
+4. Proof of completeness. Every row of every input lands in exactly one reconciliation outcome. Row counts and quantity totals tie 100% to the raw inputs. Also emit a UOM-grouped tie-out (`PCS`, `BAG`, `CONE`, `DRUM`, `ROLL`, `CTN`, `BDL`, `YDS`/`M`).
+
+## Nice-to-have (implement both)
+
+1. Incremental monthly run. Store SHA-256 hashes of processed register pages in SQLite. A re-run or next month processes only new pages unless `--force` is passed.
+2. Short controller summary. Exceptions first, readable in 30 seconds on a phone. Deliver via WhatsApp (Twilio WhatsApp Sandbox or Meta Cloud API test number) or via Telegram/email behind a WhatsApp adapter.
+
+## Hard build constraints
+
+- The LLM never does math and never invents unclear numbers. Code checks every figure.
+- Every figure traces to an exact source row, for example `[Reg P2:R05]`, `[ERP R19]`, `[Excel R20]`.
+- Reconciliation rules live in a configuration module: tolerances, unit conversions, date-window tolerances, return-row netting, and late-entry flagging. A live interview change must be possible in under two minutes.
+- Yard-to-meter factor is `1 yard = 0.9144 meters` (`1200 * 0.9144 = 1097.28`).
+- Fail safe: retry API calls; idempotent sends (no duplicate messages on re-run); completeness assertions must pass before any report is sent; alert when an input is missing, corrupt, or completeness fails.
+- Least access. Mask sensitive identifiers if any appear. Zero secrets in the repo.
+
+## Ground truth the pipeline must catch
+
+### A. Unclear handwriting (flag for human review; do not guess)
+
+1. GRN `4419`, `t4_register_page2.jpg` row 5, date `17/09`, Zarnab Chem, `H2O2 50%`, lot `L2609-119`. Qty `60` is crossed out and `66` is written above it. Flag `qty` as unclear/amended (`60` -> `66`). ERP has `66.00 DRUM`. Store Excel still has `60 drums`.
+2. GRN `4428`, `t4_register_page2.jpg` row 14, date `28/09`, Taraz Poly, `Polybags 12x16 (bundles)`, lot `L2609-128`. A dark blue ink blot hides the digits after `2` (`2??`). Do not guess `250`. Flag `qty` as unclear. ERP and Store Excel both show `250 bdl`.
+
+### B. Five field-level mismatches
+
+1. GRN `4412` lot typo. Register `P1:R12` and Store Sheet row 13 have `L2609-012`. ERP row 12 has `L2609-021` (transposed digits).
+2. GRN `4415` date. Register `P2:R01` and Store Sheet row 16 have `2026-09-12` (`12/09`). ERP row 15 has `2026-09-13`.
+3. GRN `4417` quantity. Register `P2:R03` and Store Sheet row 18 have `48 ctns`. ERP row 17 has `46.00 CTN` (2 cartons short in ERP).
+4. GRN `4419` quantity after amendment. Register `P2:R05` confirmed as `66 drums` and ERP row 19 `66.00 DRUM` disagree with Store Sheet row 20, which still has unamended `60 drums` (6 drums short in Excel).
+5. GRN `4425` unit conversion error in the store sheet. Shahtoot Weaving, `Grey fabric 63"`, lot `L2609-125`. Register `P2:R11` is `1200 yds`. ERP row 24 is `1097.28 M`. Those two physically match because `1200 * 0.9144 = 1097.28`. Store Sheet row 26 is `1200 m`. The storekeeper copied 1200 without converting, overstating fabric by `102.72 m` (`112.34 yds`).
+
+### C. Missing, extra, duplicate, and unnumbered rows
+
+1. GRN `4421` missing in ERP. Present in Register `P2:R07` (`19/09`, Taraz Poly, Stretch film, `L2609-121`, `75 rolls`) and Store Sheet row 22 (`75 rolls`). Absent from `t4_erp_grn.csv`.
+2. GRN `4430` suspicious backdated ERP-only entry. ERP row 28: `grn_date=2026-09-29`, Qasr Packaging, Cartons 5-ply, `L2609-130`, `1900.00 PCS`. Missing from Register and Store Sheet. Rows `4401`–`4428` were entered by `store.clerk` on the receipt date. `GRN-4430` was entered by `admin2` on `2026-10-02 18:47`. `GRN-4429` is skipped.
+3. GRN `4409` exact duplicate in the store sheet. Excel rows 9 and 10 are the same row (`2026-09-08`, Taraz Poly, Stretch film, `L2609-009`, `80 rolls`). Register `P1:R09` and ERP row 9 have it once.
+4. Store Sheet row 31 unnumbered supplier return. `Date=2026-09-27`, `GRN` blank, `Supplier=Taraz Poly`, `Material=Polybags 12x16`, `Lot=L2609-002` (ties to GRN `4402` from 1 Sep), `Qty Received=-5000`, `UOM=pcs`, `Remarks="Returned to supplier (torn)"`. Missing from Register and ERP.
+
+### D. Normalization and parsing traps
+
+- Mixed Excel dates: 29 rows are Excel datetimes. Excel row 18 (GRN `4416`) is the text `9/14/2026` (US `M/D/YYYY`). Register uses Pakistani `DD/MM` (`14/09`). ERP uses ISO `2026-09-14`.
+- GRN ids: `4401` (Register) vs `GRN-4401` (ERP) vs `4401` or `4401.0` (Excel).
+- UOMs: `pcs/bags/cones/drums/rolls/ctns/bdl/yds` (Register and Excel) vs `PCS/BAG/CONE/DRUM/ROLL/CTN/BDL/M` (ERP).
+- Suppliers: for example `Qasr Pkg` (Register) vs `QASR PACKAGING (PVT) LTD` (ERP) vs `Qasr Packaging` (Excel).
+
+### E. Exact completeness numbers
+
+- Row counts: Register 28, ERP 28, Store Sheet 30. 100% of rows go into mutually exclusive buckets.
+- Register raw qty sum (27 legible rows) = `113,734.00`. Resolved sum with `4419=66` and `4428=250` = `113,984.00`. The difference is `250` (GRN 4428).
+- ERP qty sum = `115,704.28`. Bridge from resolved register `113,984.00`: `-2.00` (GRN 4417) `- 75.00` (GRN 4421 missing) `- 102.72` (GRN 4425 yard-to-meter numeric diff) `+ 1,900.00` (GRN 4430 extra) = `+1,720.28` = `115,704.28`.
+- Store Sheet qty sum (all 30 rows) = `109,058.00`. Bridge from resolved register `113,984.00`: `+80.00` (GRN 4409 duplicate) `- 6.00` (GRN 4419 unamended) `- 5,000.00` (row 31 torn return) = `-4,926.00` = `109,058.00`.
+
+ERP file check already confirmed: 28 rows, `4421` and `4429` absent, `4412` lot `L2609-021`, `4415` date `2026-09-13`, `4417` qty `46`, `4419` qty `66`, `4425` qty `1097.28 M`, `4430` by `admin2` at `2026-10-02 18:47`, qty sum `115,704.28`.
+
+## How the build is scored (weight order)
+
+1. Would a busy director or controller use it? Short, exceptions first, right channel, right time.
+2. Is it right? Every figure traces to a source row. Data problems are found and handled, not hidden. The LLM never does math or guesses numbers.
+3. Does it work end to end from the README on Kestrel's data? Reproducible setup and execution.
+4. Does it fail safely? Retries, idempotency, completeness checks before send, failure alerts.
+5. Data handling: least access, masked identifiers if applicable, zero secrets in the repo.
+6. Live modification: in a 45-minute interview, a director may change a requirement during a 15-minute roleplay. Rules must be externalized so behavior can change in under two minutes.
+
+## Next architecture (constraints only; do not invent a stack here)
+
+```text
+register photos -> vision extract + uncertainty flags -> HITL for unclear fields only
+ERP CSV and store sheet -> canonical normalize (GRN id, ISO date, UOM, supplier, qty)
+all three -> deterministic reconcile -> completeness assertions -> exceptions-first message
+register photos -> SHA-256 stored in SQLite (skip seen pages unless --force)
+```
+
+Canonicalize before compare. Block the outbound message if completeness fails. Cite every exception with its source row.
+
+---
+
+This section mirrors .cursor/rules/architecture-and-how.mdc. That rule has alwaysApply: true.
+
+# Task 4 architecture and how
+
+This is the HOW for the Nocturnal AI Task 4 register reconciliation. The WHAT (anomalies, clock, rubric) lives in `project-context.mdc`. Do not write a different stack or move math into the LLM.
+
+Standing rules stay at the workspace root next to `kestrel-data/`. The tree below is the target layout to build later. Do not invent a nested copy of these rule files.
+
+## Confirmed stack (zero cost)
+
+- Language: Python 3.11+.
+- Vision: Google Gemini `gemini-2.5-flash` via the official `google-genai` SDK. Free tier through Google AI Studio. `GEMINI_API_KEY` in `.env` only.
+- Offline fallback: verified `data/ocr_snapshot.json`. If `GEMINI_API_KEY` is missing or the network drops, load the snapshot and log that clearly.
+- Tables: `pandas`, `openpyxl` (raw Excel cell types), `pydantic` (strict schemas).
+- Crops: `Pillow` row strips for unclear register rows, especially GRN `4419` and `4428`.
+- State: stdlib `sqlite3`, file `kestrel_reconcile.db`. Page hashes, review audit, message idempotency.
+- CLI: `main.py` with `argparse` and `rich`. `python main.py --month 2026-09`. Failure demo: `python main.py --demo-failure`.
+- Review UI: `app.py` with Streamlit. Resolve only doubtful items, inspect the three-way proof, trigger the controller summary.
+- Messaging via `requests`, in this order of availability:
+  1. Twilio WhatsApp Sandbox: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM`, `TEST_RECIPIENT_WHATSAPP`.
+  2. Telegram Bot API: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. Document a WhatsApp Cloud API payload adapter.
+  3. Local outbox `outbox/controller_summary_2026-09.txt` plus console, so a run with no messaging credentials still shows the exact message.
+- Never message a dataset phone or `.example` email. Send only to the configured test recipient.
+
+## Target tree
+
+```text
+kestrel-reconciliation/
+├── .env.example
+├── .gitignore                 # .env, *.db, __pycache__, outbox/
+├── requirements.txt
+├── rules_config.json
+├── README.md                  # concise, at most 2 pages
+├── main.py
+├── app.py
+├── kestrel-data/              # read-only assessment files
+│   ├── t4_register_page1.jpg
+│   ├── t4_register_page2.jpg
+│   ├── t4_erp_grn.csv
+│   └── t4_store_sheet.xlsx
+├── data/
+│   ├── ocr_snapshot.json
+│   └── crops/                 # grn_4419.jpg, grn_4428.jpg
+└── src/
+    ├── config.py
+    ├── db.py
+    ├── extractor.py
+    ├── loader.py
+    ├── review.py
+    ├── reconcile.py
+    ├── completeness.py
+    └── notifier.py
+```
+
+## Module 1: `src/config.py` and `rules_config.json`
+
+- `SCENARIO_NOW` from `.env`, default `2026-10-15T08:30:00+05:00`. `get_scenario_now()` stamps SQLite, audit logs, and messages. Never use the wall clock.
+- Live-interview knobs in `rules_config.json` (change in under two minutes, target 30 seconds):
+  - `unit_conversions.yds_to_m`: `0.9144`. Register `1200 yds` and ERP `1097.28 M` are a physical match. Store sheet `1200 m` stays a real error.
+  - `date_tolerance_days`: `0`. Set to `1` and GRN `4415` (`2026-09-12` vs `2026-09-13`) becomes matched-with-warning.
+  - `qty_tolerance_pct`: `0.0`. Raise it only if a director says to ignore small quantity gaps.
+  - `flag_late_erp_entries_hours`: `24`. `trusted_erp_users`: `["store.clerk"]`. Flags GRN `4430` entered by `admin2` on `2026-10-02` against receipt date `2026-09-29`.
+  - `auto_net_returns_by_lot`: `false`. If set `true`, net Excel row 31 `-5000 pcs` on lot `L2609-002` against GRN `4402` `25000 pcs`.
+
+## Module 2: `src/db.py`
+
+Database file: `kestrel_reconcile.db`. Five tables:
+
+1. `processed_pages`: `file_name`, `sha256_hash` (PRIMARY KEY), `month_tag`, `processed_at`, `row_count`. Skip a known page hash unless `--force`.
+2. `register_rows`: `page_no`, `row_no`, `raw_date`, `grn_no`, `supplier`, `item_desc`, `lot_no`, `raw_qty_text`, `parsed_qty` (nullable float), `uom`, `recd_by`, `is_unclear`, `unclear_field`, `unclear_reason`, `crop_path`, `resolved_qty`, `resolved_by`, `resolved_at`.
+3. `human_resolutions`: immutable log. `grn_no`, `field_name`, `raw_ocr_value`, `resolved_value`, `reviewer_note`, `resolved_by`, `timestamp` pinned to `SCENARIO_NOW`.
+4. `reconciliation_runs`: run metadata, completeness pass/fail, JSON report snapshot.
+5. `outbound_messages`: `message_hash` (SHA-256 of payload + month + channel), `channel`, `recipient`, `sent_at`, `status`. Re-runs must not send a duplicate.
+
+## Module 3: `src/extractor.py`
+
+- 3a. SHA-256 of `t4_register_page1.jpg` and `t4_register_page2.jpg`. If the hash is in `processed_pages` and `--force` is absent, load rows from SQLite.
+- 3b. Call `gemini-2.5-flash` with Pydantic schema `RegisterPageExtraction`. Prompt rules: never guess or auto-correct. Strike-through, a number written above a cross-out, ink blot, smudge, or illegible digit sets `is_unclear=True`, `unclear_field="qty"`, literal `raw_qty_text`, and `parsed_qty=None` when digits are blotted. GRN `4419`: `raw_qty_text` like `"60 crossed out, 66 above"`. GRN `4428`: `"2?? (ink blot)"`. Ignore the two blank ruled rows at the bottom of each page. Retry the API up to 3 times with exponential backoff. On missing key or network failure, use `data/ocr_snapshot.json` and log the fallback.
+- 3c. Pillow crops the unclear row strip to `data/crops/grn_4419.jpg` and `data/crops/grn_4428.jpg`.
+
+## Module 4: `src/review.py`
+
+- Query `register_rows WHERE is_unclear = 1 AND resolved_at IS NULL`.
+- Show only doubtful items (GRN `4419` and `4428`): crop first, then date, supplier, item, lot, and `unclear_reason`. ERP and Excel values are optional reference after the crop. Require an explicit human confirm (`66` for `4419`, `250` for `4428`).
+- Modes: `python main.py --review`, `--auto-resolve-demo` (log that demo resolution was applied), and Streamlit `app.py`.
+- Safety gate: if any `is_unclear=1` row is still unresolved, do not finalize the month. Halt with a clear status.
+
+## Module 5: `src/loader.py` and `src/reconcile.py`
+
+Pure Python. No LLM in loads, comparisons, or totals. Every row keeps a source pointer: `[Reg P1:R01]` through `[Reg P2:R14]`, `[ERP R01]` through `[ERP R28]`, `[Excel R02]` through `[Excel R31]`.
+
+Normalization:
+
+- Dates: register `DD/MM` plus page header Sep 2026 becomes `2026-09-DD`. ERP stays `YYYY-MM-DD`. Read raw `openpyxl` cell types. Excel row 18 (GRN `4416`) is the text `9/14/2026` (`M/D/YYYY`), not a datetime. Log a data-format warning and normalize to `2026-09-14`.
+- GRN keys: `4401`, `GRN-4401`, and `4401.0` become `"4401"`. The unnumbered return on Excel row 31 gets entity key `RETURN-L2609-002 (Excel:R31)`.
+- Duplicates before matching: Excel rows 9 and 10 are both GRN `4409` (`80 rolls`). Pair `[Excel R09]` with `[Reg P1:R09]` and `[ERP R09]`. Isolate `[Excel R10]` as duplicate-in-source so counts and sums neither double-count nor drop the row.
+- GRN `4425`: compare raw and converted quantity. `1200 yds * 0.9144 = 1097.28 M`, so `[Reg P2:R11]` and `[ERP R24]` physically match. `[Excel R26]` `1200 m` is a real unit error, `+102.72 m`.
+
+Mutually exclusive outcomes (30 entities):
+
+1. `MATCHED` — 21 GRNs: 20 clean GRNs plus `4428` after human resolution of `250 bdl`.
+2. `MATCHED_WITH_DUPLICATE_IN_EXCEL` — 1 GRN: `4409`. Primary row matches all three sources. `[Excel R10]` is a duplicate `+80 rolls`.
+3. `MISMATCHED` — 5 GRNs, with the field and each source value:
+   - `4412` `lot_no`: Reg/Excel `L2609-012` vs ERP `L2609-021`.
+   - `4415` `date`: Reg/Excel `2026-09-12` vs ERP `2026-09-13`.
+   - `4417` `qty`: Reg/Excel `48 ctns` vs ERP `46.00 CTN`.
+   - `4419` `qty`: Reg/ERP `66 drums` vs Excel `60 drums`.
+   - `4425` `qty/uom`: Reg `1200 yds` equals ERP `1097.28 M`; Excel `1200 m` is unconverted.
+4. `MISSING_FROM_SOURCE` — 3 entities:
+   - `4421`: Register `[Reg P2:R07]` `75 rolls` and Excel `[Excel R22]`. Missing in ERP.
+   - `4430`: ERP only `[ERP R28]` `1900 PCS`, `admin2`, `2026-10-02 18:47`. Missing in Register and Excel.
+   - `RETURN-L2609-002`: Excel only `[Excel R31]` `-5000 pcs`, lot `L2609-002`, remarks `Returned to supplier (torn)`. Missing in Register and ERP.
+
+## Module 6: `src/completeness.py`
+
+Fail the run if either invariant breaks. Do not send the controller summary.
+
+1. Bijective partition: every Register id (`28/28`), ERP id (`28/28`), and Store Sheet id (`30/30`) appears in exactly one bucket. `len(seen_ids) == len(raw_ids)` and the buckets are disjoint.
+2. Quantity conservation: resolved register `113,984.00`, ERP `115,704.28`, store Excel `109,058.00`. Bridges: `ERP - Reg = +1,720.28` and `Excel - Reg = -4,926.00`. Also a per-UOM tie-out for `PCS`, `BAG`, `CONE`, `DRUM`, `ROLL`, `CTN`, `BDL`, and `YDS`/`M`.
+
+## Module 7: `src/notifier.py`
+
+Controller message, readable in 20–30 seconds:
+
+1. Missing or unrecorded: backdated `GRN-4430` (`admin2`), missing `GRN-4421`, and the `-5,000 pcs` return.
+2. Quantity and unit: `4425`, `4417`, `4419`, and the `4409` duplicate.
+3. Date and lot typos: `4412` and `4415`.
+4. Stamp: `Reg: 28/28 | ERP: 28/28 | Excel: 30/30 — 100% tied`.
+
+Safe failure:
+
+- Retry Gemini and messaging up to 3 times with exponential backoff.
+- Skip send when `outbound_messages` already has the payload hash for that month and channel.
+- `--demo-failure` simulates a corrupt row or a completeness break, halts the normal report, logs the error, and sends `[CRITICAL ALERT] Kestrel Reconciliation Halted`.
+
+## Code build order
+
+1. `rules_config.json`, `.env.example`, `.gitignore`, `requirements.txt`, `src/config.py`
+2. `src/db.py`
+3. `src/extractor.py` and `data/ocr_snapshot.json`
+4. `src/loader.py`
+5. `src/review.py`
+6. `src/reconcile.py`
+7. `src/completeness.py`
+8. `src/notifier.py`
+9. `main.py`
+10. `app.py`
+11. `README.md`

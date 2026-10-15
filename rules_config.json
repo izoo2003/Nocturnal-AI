@@ -1,0 +1,16 @@
+{
+  "unit_conversions": {
+    "yds_to_m": 0.9144
+  },
+  "tolerances": {
+    "date_days": 0,
+    "qty_pct": 0.0
+  },
+  "audit_rules": {
+    "trusted_erp_users": ["store.clerk"],
+    "max_entry_delay_hours": 24
+  },
+  "behavior": {
+    "auto_net_returns_by_lot": false
+  }
+}
