@@ -1,103 +1,80 @@
-# Kestrel Industries — Task 4 Register Reconciliation
+# Kestrel Industries — September 2026 Receiving Reconciliation
 
-Three-way goods-receiving reconciliation for **September 2026**. Photograph the handwritten register, compare it to the ERP CSV and the storekeeper Excel, flag only the unclear handwriting for a human, prove nothing was dropped, then send an exceptions-first summary the Finance Controller can read on a phone in about 30 seconds.
+## 1. What It Does & How to Run It
 
-Built for the [Nocturnal AI Automation Engineer Assessment](https://github.com/izoo2003/Nocturnal-AI).
+Kestrel Industries keeps a handwritten goods-receiving register, an ERP goods-received file, and a storekeeper Excel workbook that never agree. This Task 4 pipeline photographs the September 2026 register, flags only illegible quantities for a person, reconciles all three sources in deterministic Python, proves every row was counted, and sends a short exceptions-first note the Finance Controller can read on a phone in about 30 seconds.
 
-## What it does
-
-1. **Extract** register photos with Gemini `gemini-2.5-flash`, or fall back to `data/ocr_snapshot.json` when there is no API key.
-2. **Review** only unclear quantities (GRN `4419` strike-through, GRN `4428` ink blot). Never guess digits.
-3. **Reconcile** Register, ERP, and Store Sheet in deterministic Python (no LLM math).
-4. **Prove** row partition `28/28 | 28/28 | 30/30` and quantity bridges before any message is sent.
-5. **Notify** via WhatsApp (Twilio), Telegram, or a local outbox file — idempotent, test recipient only.
-
-Scenario clock is fixed at **15 Oct 2026, 08:30 PKT** (`SCENARIO_NOW`). Do not use the wall clock.
-
-## Quick start
-
-```powershell
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+```text
+pip install -r requirements.txt
+cp .env.example .env
 python main.py --auto-resolve-demo
+python main.py --interactive-review
+python main.py --demo-failure
+streamlit run app.py
 ```
 
-Leave `GEMINI_API_KEY` blank to use the verified OCR snapshot. The controller summary is printed in the terminal and written to `outbox/latest_summary.txt`.
+Live logic lives in `pipeline/`. `src/` re-exports those modules for the CLI and Streamlit app.
 
-### Useful flags
+**What ships**
 
-| Flag | Purpose |
-|------|---------|
-| `--auto-resolve-demo` | Confirm GRN `4419=66` and `4428=250` without prompts |
-| `--interactive-review` | Type those quantities yourself |
-| `--force-ocr` | Re-extract even when the page SHA-256 is cached |
-| `--demo-failure` | Drop a row in memory; send a critical alert instead of the summary |
-| `--force-send` | Bypass message idempotency when re-testing delivery |
-| `--month 2026-09` | Month tag (default) |
+- Vision OCR via Gemini (`gemini-2.5-flash` and fallbacks) with two API keys: key 1 models, then key 2, then one wrap back to key 1. Leave keys blank to use `data/ocr_snapshot.json`.
+- Human review only for unclear rows (GRN `4419`, `4428`) in the CLI or Streamlit.
+- Deterministic three-way reconcile against `t4_erp_grn.csv` and `t4_store_sheet.xlsx`. Rules live in `rules_config.json` (date tolerance, qty tolerance, yard factor `0.9144`, late ERP flagging, optional return netting).
+- Completeness gate before the official controller summary (Register 28/28, ERP 28/28, Excel 30/30; qty bridges to `113,984` / `115,704.28` / `109,058`).
+- Short WhatsApp-ready summary: Missing, Quantity, Typos, then the 100% tie stamp.
+- Delivery order: outbox always → Meta WhatsApp Cloud API when enabled → Twilio WhatsApp if configured → Telegram. Only `TEST_RECIPIENT_WHATSAPP` is messaged. Streamlit Send uses `force_send`; CLI re-runs stay idempotent unless `--force-send`.
+- Streamlit review desk: OCR cache, HITL crops, proof tables, live rules editor, demo failure, and **Upload extra register pages** (OCR + compare to the same ERP/Excel without changing the September proof).
+- Incremental page hashes in SQLite (`kestrel_reconcile.db`). Skip known register pages unless `--force-ocr` / Force Re-Extract.
 
-Phase 1 ingestion check only:
+Happy path prints `100% tied` and writes `outbox/latest_summary.txt`.
 
-```powershell
-python scripts/verify_phase1.py
-```
+## 2. Assumptions Made
 
-## Inputs (`kestrel-data/`)
+- "Now" is `2026-10-15T08:30:00+05:00` (`Asia/Karachi`) from `SCENARIO_NOW`. The wall clock is never used.
+- On GRN `4425`, `1 yard = 0.9144 meters`, so register `1200 yds` and ERP `1097.28 M` match. Store sheet `1200 m` is an unconverted copy.
+- Supplier names and units are canonicalized for comparison. Raw text and source pointers stay on every figure (`[Reg P2:R05]`, `[ERP R19]`, `[Excel R23]`).
+- GRN `4409` appears twice in Excel. The first row is the primary match; the second is kept as a duplicate so counts and sums still include it.
+- Extra uploaded photos use page numbers ≥ 101. They never overwrite register pages 1–2 and do not run the September completeness constants. A failed OCR on an upload errors out instead of loading the September snapshot.
 
-| File | Role |
-|------|------|
-| `t4_register_page1.jpg`, `t4_register_page2.jpg` | Handwritten register, 28 filled rows |
-| `t4_erp_grn.csv` | ERP GRNs (28 rows; `4421` and `4429` absent) |
-| `t4_store_sheet.xlsx` | Store sheet `Sep-2026` (30 rows) |
+## 3. How It Fails, and How Someone Would Know
 
-Everything in the pack is fictional. Phone numbers are invalid. Emails use `.example`. **Never message dataset numbers or emails** — only the recipient in your `.env`.
+- **Unresolved handwriting.** If GRN `4419` or `4428` is still unclear, reconciliation stops and the official summary is not sent.
+- **Completeness halt.** Every register, ERP, and Excel row must land in exactly one outcome, and the quantity bridges must tie. A miss raises `CompletenessError`, blocks the summary, and sends `[CRITICAL ALERT] Kestrel Reconciliation Failed Safely`. `python main.py --demo-failure` drops a row on purpose to show that path.
+- **Retries, snapshot, idempotency.** Vision and messaging retry three times with exponential backoff. Missing keys or a dropped network load `data/ocr_snapshot.json` for the official pages and log the fallback. Each outbound payload is hashed in SQLite; unattended re-runs log `[IDEMPOTENT SKIP]`. Meta temporary tokens expire in about 24 hours; use a Business Manager system-user token for longer life. Free-form Cloud text only delivers after the recipient messages the Meta test number first (24-hour customer-care window).
 
-## Pipeline
+## 4. How We Handled the Data (Security, Privacy & Anomalies Caught)
 
-```text
-register photos -> vision + uncertainty flags -> HITL for unclear fields
-ERP CSV + store sheet -> canonical normalize
-all three -> deterministic reconcile -> completeness assertions -> exceptions-first message
-page SHA-256 in SQLite (skip seen pages unless --force-ocr)
-```
+Secrets live only in `.env` (gitignored). The dataset is fictional: phone numbers are invalid and emails use `.example`. Nothing is sent to those addresses.
 
-Live-interview knobs live in [`rules_config.json`](rules_config.json) (change in under two minutes):
+| Ref | What was caught |
+| --- | --- |
+| 4419 | Qty `60` struck through, `66` written above. Flagged. Excel still `60` drums. |
+| 4428 | Ink blot `2??`. Not guessed. ERP and Excel both `250 bdl`. |
+| 4412 | Lot `L2609-012` vs ERP `L2609-021`. |
+| 4415 | Date 12 Sep vs ERP 13 Sep. |
+| 4417 | `48 ctns` vs ERP `46`. |
+| 4425 | `1200 yds` = `1097.28 M`. Excel copied `1200 m`. |
+| 4421 | `75 rolls` in the register and Excel. Missing in ERP. |
+| 4430 | ERP only. `admin2` entered it `2026-10-02 18:47`. |
+| 4409 | Excel duplicate. Register and ERP once. |
+| Row 31 | Unnumbered `-5000 pcs` return, lot `L2609-002`. |
+| 4416 | Excel text date `9/14/2026` normalized to `2026-09-14`. |
 
-- `unit_conversions.yds_to_m` (`0.9144`) — Register `1200 yds` equals ERP `1097.28 M`
-- `tolerances.date_days` / `qty_pct`
-- `audit_rules.trusted_erp_users` / `max_entry_delay_hours` — flags late `GRN-4430` / `admin2`
-- `behavior.auto_net_returns_by_lot` — optional netting of Excel row 31 against GRN `4402`
+## 5. What I Would Do With Another Week
 
-## Layout
+- A WhatsApp reply loop so the storekeeper can confirm a doubtful crop by replying with the number.
+- A debit-note table that links negative returns (lot `L2609-002`) to the original GRN.
+- Deskew and per-cell boxes so a crumpled factory photo still lands on the right row.
 
-```text
-main.py                 CLI entrypoint
-app.py                  (optional Streamlit review UI — not required for CLI demo)
-rules_config.json       Externalized match rules
-requirements.txt
-.env.example            Safe template — copy to .env locally
-kestrel-data/           Assessment inputs (read-only)
-data/ocr_snapshot.json  Offline vision fallback
-data/crops/             Generated unclear-row strips
-src/
-  config.py  db.py  extractor.py  loader.py
-  review.py  reconcile.py  completeness.py  notifier.py
-```
+## 6. AI Tools Used & Rough Time Log
 
-## Safety and what must not be committed
+Development used Cursor, Gemini for architecture planning, and `gemini-2.5-flash` for runtime vision OCR (with the checked-in snapshot when the API is unavailable).
 
-| Never commit | Why |
-|--------------|-----|
-| `.env` | API keys, tokens, your test WhatsApp/Telegram target |
-| `*.db` | Local SQLite run state |
-| `outbox/` | Generated messages and reports |
-| `data/crops/*.jpg` | Regenerated on extract |
-
-Copy secrets only into a local `.env` from [`.env.example`](.env.example). Keys and tokens must not appear in code, logs, screenshots, or git. Messaging goes only to `TEST_RECIPIENT_WHATSAPP` or `TELEGRAM_CHAT_ID`.
-
-## Expected happy-path stamp
-
-```text
-Matched: 22/28 GRNs | Reg: 28/28 rows (113,984) | ERP: 28/28 rows (115,704.28) | Excel: 30/30 rows (109,058) — 100% tied.
-```
-
-Exceptions called out first: missing `GRN-4430` / `GRN-4421` / torn return; quantity and unit on `4425`, `4417`, `4419`, `4409` duplicate; lot/date typos on `4412` and `4415`.
+| Part | Hours |
+| --- | --- |
+| Data audit and architecture | 1.5 |
+| Ingestion and SQLite state | 1.5 |
+| Vision OCR and human review | 1.5 |
+| Three-way reconciliation and completeness | 1.5 |
+| Streamlit UI, messaging, uploads, and docs | 1.0 |
+| **Total** | **7.0** |

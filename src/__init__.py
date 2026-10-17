@@ -1,1 +1,1 @@
-"""Kestrel Industries register reconciliation."""
+"""Compatibility package that re-exports pipeline modules."""

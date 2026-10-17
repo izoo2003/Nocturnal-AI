@@ -32,6 +32,9 @@ outbox/
 data/crops/*
 !data/crops/.gitkeep
 
+# Extra register photos uploaded from the review desk
+data/uploads/*
+
 # Editor / OS
 .cursor/
 .idea/

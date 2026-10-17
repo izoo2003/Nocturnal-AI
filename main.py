@@ -10,7 +10,7 @@ from pathlib import Path
 
 from src.completeness import CompletenessError, verify_completeness
 from src.config import ROOT, ensure_directories, get_scenario_now, load_rules
-from src.db import init_db, list_all_register_rows, save_reconciliation_run
+from src.db import init_db, list_official_register_rows, save_reconciliation_run
 from src.extractor import extract_register_page
 from src.loader import load_erp_grn, load_store_sheet
 from src.notifier import format_controller_summary, send_failure_alert, send_message
@@ -65,7 +65,7 @@ def main() -> None:
 def _register_rows() -> list[dict]:
     conn = init_db()
     try:
-        return [dict(row) for row in list_all_register_rows(conn)]
+        return [dict(row) for row in list_official_register_rows(conn)]
     finally:
         conn.close()
 
